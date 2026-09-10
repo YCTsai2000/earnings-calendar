@@ -1,0 +1,17 @@
+# 觀察名單：一行一個股票代號
+# 以 # 開頭的整行是註解，會被忽略；行尾也可以用 # 加註解
+# 想增加或刪除股票，直接編輯這個檔案即可，不用改任何程式碼
+
+AAPL   # 蘋果
+NVDA   # Nvidia
+TSLA   # 特斯拉
+MSFT   # 微軟
+GOOGL  # Google (Alphabet)
+AMZN   # 亞馬遜
+META   # Meta (Facebook)
+MU
+ORCL
+DELL
+SPCX
+LITE
+RMBS
