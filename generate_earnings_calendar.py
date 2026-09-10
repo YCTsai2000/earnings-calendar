@@ -19,6 +19,8 @@ try:
 except ImportError:
     sys.exit("找不到 pandas，請先執行：pip install pandas lxml --break-system-packages")
 
+from io import StringIO
+
 
 SP500_WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 FINNHUB_URL = "https://finnhub.io/api/v1/calendar/earnings"
