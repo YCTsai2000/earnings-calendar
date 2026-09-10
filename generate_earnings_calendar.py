@@ -33,7 +33,12 @@ HOUR_LABEL = {
 
 
 def get_sp500_symbols() -> set:
-    tables = pd.read_html(SP500_WIKI_URL)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+    }
+    resp = requests.get(SP500_WIKI_URL, headers=headers, timeout=30)
+    resp.raise_for_status()
+    tables = pd.read_html(StringIO(resp.text))
     df = tables[0]
     raw_symbols = set(df["Symbol"].astype(str).str.strip().str.upper())
 
