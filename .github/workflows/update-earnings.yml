@@ -8,6 +8,7 @@ on:
     branches: [main]
     paths:
       - "generate_earnings_calendar.py"
+      - "watchlist.txt"   # 改觀察名單時也會自動觸發重新產生
 
 permissions:
   contents: write
@@ -26,7 +27,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install requests pandas lxml
+          pip install requests
 
       - name: Generate earnings calendar
         env:
