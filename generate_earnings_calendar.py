@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-S&P 500 財報行事曆產生器（Finnhub 版）
+自訂觀察名單財報行事曆產生器（Finnhub 版）
 """
 
 import argparse
@@ -14,15 +14,7 @@ try:
 except ImportError:
     sys.exit("找不到 requests，請先執行：pip install requests --break-system-packages")
 
-try:
-    import pandas as pd
-except ImportError:
-    sys.exit("找不到 pandas，請先執行：pip install pandas lxml --break-system-packages")
 
-from io import StringIO
-
-
-SP500_WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 FINNHUB_URL = "https://finnhub.io/api/v1/calendar/earnings"
 
 HOUR_LABEL = {
@@ -32,25 +24,31 @@ HOUR_LABEL = {
 }
 
 
-def get_sp500_symbols() -> set:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-    }
-    resp = requests.get(SP500_WIKI_URL, headers=headers, timeout=30)
-    resp.raise_for_status()
-    tables = pd.read_html(StringIO(resp.text))
-    df = tables[0]
-    raw_symbols = set(df["Symbol"].astype(str).str.strip().str.upper())
+def load_watchlist(path: str) -> set:
+    """
+    讀取觀察名單檔案。格式規則：
+      - 一行一個股票代號
+      - 以 # 開頭的整行視為註解，會被忽略
+      - 空白行會被忽略
+      - 大小寫不敏感（內部一律轉大寫比對）
+    """
+    if not os.path.exists(path):
+        sys.exit(f"[錯誤] 找不到觀察名單檔案：{path}")
 
-    normalized = set()
-    for s in raw_symbols:
-        normalized.add(s)
-        normalized.add(s.replace(".", "/"))
-        normalized.add(s.replace(".", ""))
-    return normalized
+    symbols = set()
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            symbol = line.split("#")[0].strip()
+            if symbol:
+                symbols.add(symbol.upper())
+    return symbols
 
 
 def fetch_earnings(start_date: datetime.date, end_date: datetime.date, api_key: str):
+    """一次呼叫 Finnhub，取得整段日期範圍的財報資料。"""
     params = {
         "from": start_date.strftime("%Y-%m-%d"),
         "to": end_date.strftime("%Y-%m-%d"),
@@ -156,7 +154,8 @@ def build_event(item: dict, now_stamp: str, alarm_hours_before: int) -> str:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="產生 S&P 500 財報 .ics 行事曆檔（Finnhub 版）")
+    parser = argparse.ArgumentParser(description="產生自訂觀察名單的財報 .ics 行事曆檔（Finnhub 版）")
+    parser.add_argument("--watchlist", type=str, default="watchlist.txt", help="觀察名單檔案路徑")
     parser.add_argument("--days-ahead", type=int, default=45, help="從今天起往後抓幾天的財報")
     parser.add_argument("--output", type=str, default="docs/earnings.ics", help="輸出檔案路徑")
     parser.add_argument(
@@ -169,9 +168,8 @@ def main():
     if not api_key:
         sys.exit("[錯誤] 找不到環境變數 FINNHUB_API_KEY，請先設定好金鑰再執行")
 
-    print("正在抓取 S&P 500 成分股名單...")
-    sp500_symbols = get_sp500_symbols()
-    print(f"共取得 {len(sp500_symbols)} 個代號（含格式變體）")
+    watchlist = load_watchlist(args.watchlist)
+    print(f"觀察名單共 {len(watchlist)} 檔：{', '.join(sorted(watchlist))}")
 
     today = datetime.date.today()
     end_date = today + datetime.timedelta(days=args.days_ahead)
@@ -179,19 +177,19 @@ def main():
     raw_items = fetch_earnings(today, end_date, api_key)
     print(f"Finnhub 總共回傳 {len(raw_items)} 筆財報資料（含所有美股）")
 
-    events = [item for item in raw_items if item.get("symbol", "").upper() in sp500_symbols]
-    print(f"篩選後，屬於 S&P 500 的財報事件共 {len(events)} 筆")
+    events = [item for item in raw_items if item.get("symbol", "").upper() in watchlist]
+    print(f"篩選後，屬於觀察名單的財報事件共 {len(events)} 筆")
 
     now_stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
     body = "\r\n".join(
         [
             "BEGIN:VCALENDAR",
-            "PRODID:-//EarningsCalendarScript//Finnhub 1.0//EN",
+            "PRODID:-//EarningsCalendarScript//Watchlist 1.0//EN",
             "VERSION:2.0",
             "CALSCALE:GREGORIAN",
             "METHOD:PUBLISH",
-            "X-WR-CALNAME:S&P 500 財報行事曆（自動更新）",
+            "X-WR-CALNAME:我的觀察名單財報行事曆（自動更新）",
             "X-WR-TIMEZONE:Asia/Taipei",
             "REFRESH-INTERVAL;VALUE=DURATION:P1D",
             "X-PUBLISHED-TTL:P1D",
