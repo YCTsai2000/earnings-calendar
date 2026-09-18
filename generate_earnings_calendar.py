@@ -201,25 +201,25 @@ def load_watchlist(path: str) -> set:
 
 OFFICIAL_ANNOUNCEMENT_HEADLINE_PATTERNS = (
     re.compile(
-        r"\\b(?:to|will)\\s+(?:report|release|announce)\\b"
-        r".{0,180}\\b(?:results?|earnings)\\b",
+        r"\b(?:to|will)\s+(?:report|release|announce)\b"
+        r".{0,180}\b(?:results?|earnings)\b",
         re.IGNORECASE,
     ),
     re.compile(
-        r"\\b(?:announces?|releases?|sets?|schedules?)\\b"
-        r".{0,100}\\b(?:date|timing)\\b"
-        r".{0,160}\\b(?:results?|earnings)\\b",
+        r"\b(?:announces?|releases?|sets?|schedules?)\b"
+        r".{0,100}\b(?:date|timing)\b"
+        r".{0,160}\b(?:results?|earnings)\b",
         re.IGNORECASE,
     ),
     re.compile(
-        r"\\b(?:announces?|sets?|schedules?)\\b"
-        r".{0,180}\\b(?:earnings|financial results|quarterly results)\\b"
-        r".{0,100}\\b(?:conference call|webcast|release)\\b",
+        r"\b(?:announces?|sets?|schedules?)\b"
+        r".{0,180}\b(?:earnings|financial results|quarterly results)\b"
+        r".{0,100}\b(?:conference call|webcast|release)\b",
         re.IGNORECASE,
     ),
     re.compile(
-        r"\\b(?:earnings|financial results|quarterly results)\\b"
-        r".{0,120}\\b(?:scheduled|set)\\b",
+        r"\b(?:earnings|financial results|quarterly results)\b"
+        r".{0,120}\b(?:scheduled|set)\b",
         re.IGNORECASE,
     ),
 )
@@ -301,18 +301,18 @@ def text_mentions_candidate_date(
     year = candidate_date.year
 
     named_month_pattern = re.compile(
-        rf"\\b(?:{re.escape(month_full)}|{re.escape(month_abbr)}\\.?)"
-        rf"\\s+0?{day}(?:st|nd|rd|th)?"
-        rf"(?:\\s*,\\s*|\\s+){year}\\b",
+        rf"\b(?:{re.escape(month_full)}|{re.escape(month_abbr)}\.?)"
+        rf"\s+0?{day}(?:st|nd|rd|th)?"
+        rf"(?:\s*,\s*|\s+){year}\b",
         re.IGNORECASE,
     )
 
     numeric_pattern = re.compile(
-        rf"\\b0?{candidate_date.month}/0?{day}/{year}\\b"
+        rf"\b0?{candidate_date.month}/0?{day}/{year}\b"
     )
 
     iso_pattern = re.compile(
-        rf"\\b{re.escape(candidate_date.isoformat())}\\b"
+        rf"\b{re.escape(candidate_date.isoformat())}\b"
     )
 
     return any(
