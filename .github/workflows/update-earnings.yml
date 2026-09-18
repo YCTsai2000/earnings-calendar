@@ -16,7 +16,6 @@ on:
     paths:
       - "generate_earnings_calendar.py"
       - "watchlist.txt"
-      - "official_earnings.json"
       - "tests/**"
       - ".github/workflows/update-earnings.yml"
 
