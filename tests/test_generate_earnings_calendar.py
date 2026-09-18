@@ -281,11 +281,11 @@ class SourceStatusTests(unittest.TestCase):
         )
         self.assertEqual(
             estimated_description,
-            "DESCRIPTION:股票代號：TSLA\\n\\n"
-            "資料來源：Finnhub\\n\\n"
+            "DESCRIPTION:股票代號：TSLA\\n"
+            "資料來源：Finnhub\\n"
             "概略美東時間：2026-10-20 16:30 "
             "(America/New_York)\\n"
-            "注意：日期與時間尚未獲公司官方確認，可能變動。\\n\\n"
+            "注意：日期與時間尚未獲公司官方確認，可能變動。\\n"
             "財測 EPS：0.4508\\n"
             "實際 EPS：無資料\\n"
             "財測營收：28\\,265\\,984\\,061\\n"
