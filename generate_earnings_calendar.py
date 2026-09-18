@@ -772,8 +772,6 @@ def build_event(
 
         f"資料狀態：{status_label}",
 
-        f"資料來源：{source_name}",
-
         f"美東日期："
         f"{us_date.isoformat()}",
 
@@ -807,10 +805,13 @@ def build_event(
         f"{fmt_num(item.get('revenueActual'))}",
     ]
 
-    if source_url:
+    # 官方來源只供程式驗證與判定，不放入行事曆附註，
+    # 避免官方事件同時顯示來源名稱與公告網址而顯得雜亂。
+    # 第三方預估仍保留資料來源，讓使用者知道預估資料來自何處。
+    if not is_official:
         description_lines.insert(
-            3,
-            f"官方來源：{source_url}",
+            2,
+            f"資料來源：{source_name}",
         )
 
     description = "\n".join(
