@@ -250,6 +250,97 @@ class ExistingCalendarFallbackTests(unittest.TestCase):
             ["ORCL"],
         )
 
+    def _write_verified_official_mu(self):
+        self.ics_path.write_text(
+            "BEGIN:VCALENDAR\r\n"
+            "BEGIN:VEVENT\r\n"
+            "DTSTART;TZID=America/New_York:20260930T163000\r\n"
+            "UID:earnings-MU-20260930@earnings-calendar-script\r\n"
+            "DESCRIPTION:股票代號：MU\\n"
+            "資料來源：Micron Investor Relations\\n"
+            "概略美東時間：2026-09-30 16:30 "
+            "(America/New_York)\r\n"
+            "X-EARNINGS-SOURCE-STATUS:OFFICIAL\r\n"
+            "SUMMARY:MU 財報 (Q4 2026)\r\n"
+            "END:VEVENT\r\n"
+            "END:VCALENDAR\r\n",
+            encoding="utf-8",
+        )
+
+    def test_reads_official_status_and_source_from_existing_ics(self):
+        self._write_verified_official_mu()
+
+        existing = calendar.load_existing_events(
+            str(self.ics_path), {"MU"}, START, END
+        )
+
+        self.assertEqual(existing[0]["status"], calendar.STATUS_OFFICIAL)
+        self.assertEqual(
+            existing[0]["source_name"],
+            "Micron Investor Relations",
+        )
+
+    def test_matching_candidate_keeps_verified_official_status(self):
+        self._write_verified_official_mu()
+        existing = calendar.load_existing_events(
+            str(self.ics_path), {"MU"}, START, END
+        )
+        api_item = {
+            "symbol": "MU",
+            "date": "2026-09-30",
+            "hour": "amc",
+            "quarter": 4,
+            "year": 2026,
+            "epsEstimate": 32.2164,
+        }
+
+        fresh, preserved = calendar.merge_earnings_events(
+            {"MU": [api_item]},
+            [],
+            existing,
+            START,
+        )
+
+        self.assertEqual(len(fresh), 1)
+        self.assertEqual(
+            fresh[0]["_status"],
+            calendar.STATUS_OFFICIAL,
+        )
+        self.assertEqual(
+            fresh[0]["_source_name"],
+            "Micron Investor Relations",
+        )
+        self.assertEqual(preserved, [])
+
+    def test_old_official_survives_third_party_date_movement(self):
+        self._write_verified_official_mu()
+        existing = calendar.load_existing_events(
+            str(self.ics_path), {"MU"}, START, END
+        )
+        moved_estimate = {
+            "symbol": "MU",
+            "date": "2026-10-01",
+            "hour": "amc",
+            "quarter": 4,
+            "year": 2026,
+        }
+
+        fresh, preserved = calendar.merge_earnings_events(
+            {"MU": [moved_estimate]},
+            [],
+            existing,
+            START,
+        )
+
+        self.assertEqual(
+            fresh[0]["_status"],
+            calendar.STATUS_ESTIMATED,
+        )
+        self.assertEqual(
+            [event["date"].isoformat() for event in preserved],
+            ["2026-09-30"],
+        )
+
     def test_official_event_survives_missing_finnhub_row(self):
         existing = calendar.load_existing_events(
             str(self.ics_path), {"MU"}, START, END
