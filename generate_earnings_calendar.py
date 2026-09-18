@@ -7,12 +7,14 @@
 
 功能：
 1. 逐檔向 Finnhub 查詢 watchlist.txt 中的股票，避免全市場查詢遭截斷
-2. Finnhub 暫時漏資料時，保留上一版 ICS 中仍有效的事件
-3. Finnhub 的 date 視為美國東部時間（America/New_York）的日期
-4. BMO / AMC / DMH 使用概略公布時間
-5. ICS 使用 America/New_York 時區儲存事件，並附上 VTIMEZONE
+2. 以 official_earnings.json 記錄公司官方公告確認的事件
+3. 在行事曆標示「官方確認」或「第三方預估」
+4. 只有 API 查詢失敗時，才暫時沿用上一版仍有效的事件
+5. Finnhub 的 date 視為美國東部時間（America/New_York）的日期
+6. BMO / AMC / DMH 使用概略公布時間
+7. ICS 使用 America/New_York 時區儲存事件，並附上 VTIMEZONE
    （EST/EDT 日光節約時間規則），符合 RFC 5545 規範
-6. Google Calendar / Apple Calendar / Outlook
+8. Google Calendar / Apple Calendar / Outlook
    會依照使用者自己的行事曆時區自動轉換
 
 時段概略時間：
@@ -49,6 +51,7 @@ ORCL
 
 import argparse
 import datetime
+import json
 import os
 import re
 import sys
@@ -68,6 +71,14 @@ except ImportError:
 # ============================================================
 
 FINNHUB_URL = "https://finnhub.io/api/v1/calendar/earnings"
+
+STATUS_OFFICIAL = "official"
+STATUS_ESTIMATED = "estimated"
+
+STATUS_LABEL = {
+    STATUS_OFFICIAL: "官方確認",
+    STATUS_ESTIMATED: "第三方預估",
+}
 
 
 # ============================================================
@@ -158,6 +169,93 @@ def load_watchlist(path: str) -> set:
                 symbols.add(symbol.upper())
 
     return symbols
+
+
+# ============================================================
+# 官方財報公告
+# ============================================================
+
+def load_official_earnings(
+    path: str,
+    watchlist: set,
+    start_date: datetime.date,
+    end_date: datetime.date,
+):
+    """
+    讀取經公司 Investor Relations 公告確認的財報事件。
+
+    官方事件不依賴 Finnhub；只要仍在查詢期間內就會寫入 ICS。
+    """
+
+    if not os.path.exists(path):
+        sys.exit(f"[錯誤] 找不到官方財報資料檔：{path}")
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        sys.exit(f"[錯誤] 無法讀取官方財報資料：{e}")
+
+    if not isinstance(data, list):
+        sys.exit("[錯誤] 官方財報資料必須是 JSON 陣列")
+
+    events = []
+    seen = set()
+
+    for index, raw_item in enumerate(data, start=1):
+        if not isinstance(raw_item, dict):
+            sys.exit(f"[錯誤] 官方財報第 {index} 筆不是物件")
+
+        item = dict(raw_item)
+        symbol = str(item.get("symbol", "")).upper().strip()
+        date_str = str(item.get("date", "")).strip()
+        source_url = str(item.get("source_url", "")).strip()
+
+        try:
+            event_date = datetime.date.fromisoformat(date_str)
+        except ValueError:
+            sys.exit(
+                f"[錯誤] 官方財報第 {index} 筆日期格式錯誤：{date_str}"
+            )
+
+        exact_time = str(item.get("time", "")).strip()
+        if exact_time:
+            try:
+                datetime.time.fromisoformat(exact_time)
+            except ValueError:
+                sys.exit(
+                    f"[錯誤] 官方財報第 {index} 筆時間格式錯誤："
+                    f"{exact_time}"
+                )
+
+        if not symbol or not source_url:
+            sys.exit(
+                f"[錯誤] 官方財報第 {index} 筆缺少 symbol 或 source_url"
+            )
+
+        key = (symbol, date_str)
+        if key in seen:
+            sys.exit(f"[錯誤] 官方財報重複：{symbol} {date_str}")
+        seen.add(key)
+
+        if (
+            symbol not in watchlist
+            or event_date < start_date
+            or event_date > end_date
+        ):
+            continue
+
+        item["symbol"] = symbol
+        item["date"] = date_str
+        item["_status"] = STATUS_OFFICIAL
+        item["_source_name"] = item.get(
+            "source_name",
+            "公司官方 Investor Relations",
+        )
+        item["_source_url"] = source_url
+        events.append(item)
+
+    return events
 
 
 # ============================================================
@@ -310,7 +408,7 @@ def load_existing_events(
     """
     讀取上一版 ICS 中仍位於查詢區間的 watchlist 事件。
 
-    保留原始 VEVENT 文字，避免 Finnhub 某天突然漏值時把事件刪除。
+    保留原始 VEVENT 文字，僅在 API 查詢失敗時作為暫時備援。
     """
 
     if not os.path.exists(path):
@@ -366,25 +464,58 @@ def load_existing_events(
     return events
 
 
-def merge_with_existing_events(results: dict, existing_events: list):
+def merge_earnings_events(
+    results: dict,
+    official_events: list,
+    existing_events: list,
+):
     """
-    成功取得新資料時以 Finnhub 為準；無資料或查詢失敗時保留舊事件。
+    官方事件優先；其他事件標為第三方預估。
+
+    只有 API 明確查詢失敗（值為 None）時才暫時保留上一版事件。
+    Finnhub 成功回傳空資料時，不保留舊的第三方預估日期。
     """
 
     fresh_by_key = {}
+    official_symbols = {
+        item["symbol"]
+        for item in official_events
+    }
+
+    for official_item in official_events:
+        symbol = official_item["symbol"]
+        api_items = results.get(symbol) or []
+        matching_api_item = next(
+            (
+                item
+                for item in api_items
+                if item.get("date") == official_item["date"]
+            ),
+            {},
+        )
+        merged_item = {
+            **matching_api_item,
+            **official_item,
+        }
+        key = (symbol, merged_item["date"])
+        fresh_by_key[key] = merged_item
 
     for symbol, items in results.items():
-        if not items:
+        if symbol in official_symbols or not items:
             continue
 
         for item in items:
-            key = (symbol, item.get("date", ""))
-            fresh_by_key[key] = item
+            estimated_item = dict(item)
+            estimated_item["_status"] = STATUS_ESTIMATED
+            estimated_item["_source_name"] = "Finnhub"
+            key = (symbol, estimated_item.get("date", ""))
+            fresh_by_key[key] = estimated_item
 
     preserved = []
 
     for event in existing_events:
-        if not results.get(event["symbol"]):
+        symbol = event["symbol"]
+        if symbol not in official_symbols and results.get(symbol) is None:
             preserved.append(event)
 
     fresh = sorted(fresh_by_key.values(), key=event_sort_key)
@@ -508,10 +639,15 @@ def get_us_eastern_datetime(item: dict) -> datetime.datetime:
         or ""
     ).lower()
 
-    approx_time = HOUR_APPROX_TIME.get(
-        hour_code,
-        DEFAULT_APPROX_TIME
-    )
+    exact_time = str(item.get("time", "")).strip()
+
+    if exact_time:
+        event_time = datetime.time.fromisoformat(exact_time)
+    else:
+        event_time = HOUR_APPROX_TIME.get(
+            hour_code,
+            DEFAULT_APPROX_TIME
+        )
 
     # Python 的 zoneinfo / ICS 使用 IANA 時區
     # 美國東部：
@@ -522,7 +658,7 @@ def get_us_eastern_datetime(item: dict) -> datetime.datetime:
 
     us_dt = datetime.datetime.combine(
         us_date,
-        approx_time
+        event_time
     ).replace(tzinfo=us_tz)
 
     return us_dt
@@ -606,8 +742,23 @@ def build_event(
         ""
     )
 
+    source_status = item.get(
+        "_status",
+        STATUS_ESTIMATED,
+    )
+    status_label = STATUS_LABEL.get(
+        source_status,
+        STATUS_LABEL[STATUS_ESTIMATED],
+    )
+    source_name = item.get(
+        "_source_name",
+        "Finnhub",
+    )
+    source_url = item.get("_source_url", "")
+    is_official = source_status == STATUS_OFFICIAL
+
     summary = (
-        f"{symbol} 財報 "
+        f"【{status_label}】{symbol} 財報 "
         f"(Q{quarter} {year})"
     )
 
@@ -619,18 +770,28 @@ def build_event(
 
         f"股票代號：{symbol}",
 
+        f"資料狀態：{status_label}",
+
+        f"資料來源：{source_name}",
+
         f"美東日期："
         f"{us_date.isoformat()}",
 
         f"公布時段："
         f"{hour_label}",
 
-        "注意："
-        "公布時間為概略估計，"
-        "僅用於跨時區日期換算。",
+        (
+            "注意：日期與時間已由公司官方公告確認。"
+            if is_official
+            else "注意：日期與時間尚未獲公司官方確認，可能變動。"
+        ),
 
-        f"概略美東時間："
-        f"{us_dt.strftime('%Y-%m-%d %H:%M')} "
+        (
+            "官方美東時間："
+            if is_official and item.get("time")
+            else "概略美東時間："
+        )
+        + f"{us_dt.strftime('%Y-%m-%d %H:%M')} "
         f"({US_TIMEZONE})",
 
         f"財測 EPS："
@@ -645,6 +806,12 @@ def build_event(
         f"實際營收："
         f"{fmt_num(item.get('revenueActual'))}",
     ]
+
+    if source_url:
+        description_lines.insert(
+            3,
+            f"官方來源：{source_url}",
+        )
 
     description = "\n".join(
         description_lines
@@ -691,9 +858,16 @@ def build_event(
 
         f"LAST-MODIFIED:{now_stamp}",
 
-        "SEQUENCE:0",
+        f"SEQUENCE:{1 if is_official else 0}",
 
-        "STATUS:CONFIRMED",
+        (
+            "STATUS:CONFIRMED"
+            if is_official
+            else "STATUS:TENTATIVE"
+        ),
+
+        "X-EARNINGS-SOURCE-STATUS:"
+        f"{source_status.upper()}",
 
         f"SUMMARY:"
         f"{ics_escape(summary)}",
@@ -718,6 +892,12 @@ def build_event(
 
         "END:VEVENT",
     ]
+
+    if source_url:
+        lines.insert(
+            lines.index("TRANSP:OPAQUE"),
+            f"URL:{source_url}",
+        )
 
     return "\r\n".join(
         fold_line(line)
@@ -766,6 +946,15 @@ def main():
         default="watchlist.txt",
         help=(
             "觀察名單檔案路徑"
+        ),
+    )
+
+    parser.add_argument(
+        "--official-events",
+        type=str,
+        default="official_earnings.json",
+        help=(
+            "公司官方公告確認的財報資料 JSON"
         ),
     )
 
@@ -882,6 +1071,13 @@ def main():
         end_date,
     )
 
+    official_events = load_official_earnings(
+        args.official_events,
+        watchlist,
+        today,
+        end_date,
+    )
+
     results, query_errors = fetch_watchlist_earnings(
         watchlist,
         today,
@@ -889,15 +1085,30 @@ def main():
         api_key,
     )
 
-    events, preserved_events = merge_with_existing_events(
+    events, preserved_events = merge_earnings_events(
         results,
+        official_events,
         existing_events,
     )
 
-    print(
-        f"逐檔查詢完成：新資料 {len(events)} 筆，"
-        f"異常保留 {len(preserved_events)} 筆"
+    official_count = sum(
+        item.get("_status") == STATUS_OFFICIAL
+        for item in events
     )
+    estimated_count = sum(
+        item.get("_status") == STATUS_ESTIMATED
+        for item in events
+    )
+
+    print(
+        f"逐檔查詢完成：官方確認 {official_count} 筆，"
+        f"第三方預估 {estimated_count} 筆，"
+        f"API 失敗暫存 {len(preserved_events)} 筆"
+    )
+
+    official_by_symbol = {}
+    for item in official_events:
+        official_by_symbol.setdefault(item["symbol"], []).append(item)
 
     existing_by_symbol = {}
     for event in preserved_events:
@@ -906,9 +1117,18 @@ def main():
     for symbol in sorted(watchlist):
         items = results[symbol]
 
+        official_for_symbol = official_by_symbol.get(symbol, [])
+        if official_for_symbol:
+            dates = ", ".join(
+                item["date"]
+                for item in official_for_symbol
+            )
+            print(f"[OFFICIAL] {symbol:<6} {dates}")
+            continue
+
         if items:
             dates = ", ".join(item["date"] for item in items)
-            print(f"[OK]   {symbol:<6} {dates}")
+            print(f"[ESTIMATE] {symbol:<6} {dates}")
             continue
 
         preserved_for_symbol = existing_by_symbol.get(symbol, [])
@@ -919,11 +1139,11 @@ def main():
             )
             reason = query_errors.get(
                 symbol,
-                "Finnhub 本次未回傳資料",
+                "Finnhub 查詢失敗",
             )
             message = (
                 f"{symbol} {reason}；"
-                f"已保留上一版事件：{dates}"
+                f"暫時沿用上一版事件：{dates}"
             )
         elif items is None:
             message = (
@@ -961,6 +1181,11 @@ def main():
                 item
             )
 
+            status_label = STATUS_LABEL.get(
+                item.get("_status", STATUS_ESTIMATED),
+                STATUS_LABEL[STATUS_ESTIMATED],
+            )
+
             hour_code = (
                 item.get("hour", "")
                 or ""
@@ -975,6 +1200,7 @@ def main():
                 f"{us_dt.strftime('%Y-%m-%d %H:%M')} "
                 f"ET | "
                 f"{symbol:<6} | "
+                f"{status_label} | "
                 f"{hour_label}"
             )
 
@@ -992,7 +1218,7 @@ def main():
     for event in preserved_events:
         print(
             f"{event['date'].isoformat()} --:-- ET | "
-            f"{event['symbol']:<6} | 保留上一版事件"
+            f"{event['symbol']:<6} | API 失敗，暫用上一版事件"
         )
 
     if preserved_events:
@@ -1022,7 +1248,7 @@ def main():
 
         "PRODID:"
         "//EarningsCalendarScript"
-        "//Watchlist 3.0"
+        "//Watchlist 3.1"
         "//EN",
 
         "VERSION:2.0",
