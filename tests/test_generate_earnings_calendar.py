@@ -192,7 +192,12 @@ class SourceStatusTests(unittest.TestCase):
         official_unfolded = official.replace("\r\n ", "")
         estimated_unfolded = estimated.replace("\r\n ", "")
 
-        self.assertIn("【官方確認】MU 財報", official)
+        self.assertIn(
+            "SUMMARY:MU 財報 (Q4 2026)",
+            official_unfolded,
+        )
+        self.assertNotIn("【官方確認】", official_unfolded)
+        self.assertNotIn("【預估】", official_unfolded)
         self.assertIn("STATUS:CONFIRMED", official)
         self.assertIn("X-EARNINGS-SOURCE-STATUS:OFFICIAL", official)
         self.assertNotIn(
@@ -200,7 +205,11 @@ class SourceStatusTests(unittest.TestCase):
         )
         self.assertNotIn("官方來源：", official_unfolded)
         self.assertNotIn("URL:https://example.com/mu", official_unfolded)
-        self.assertIn("【第三方預估】TSLA 財報", estimated)
+        self.assertIn(
+            "SUMMARY:TSLA 財報 (Q3 2026)【預估】",
+            estimated_unfolded,
+        )
+        self.assertNotIn("【第三方預估】", estimated_unfolded)
         self.assertIn("STATUS:TENTATIVE", estimated)
         self.assertIn("X-EARNINGS-SOURCE-STATUS:ESTIMATED", estimated)
         self.assertIn("資料來源：Finnhub", estimated_unfolded)
