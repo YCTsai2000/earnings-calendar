@@ -812,7 +812,6 @@ def build_event(
 
     description_lines = [
         f"股票代號：{symbol}",
-        "",
     ]
 
     # 官方來源只供程式驗證與判定，不放入行事曆附註，
@@ -821,13 +820,11 @@ def build_event(
     if not is_official:
         description_lines.extend([
             f"資料來源：{source_name}",
-            "",
         ])
 
     description_lines.extend([
         time_line,
         note_line,
-        "",
         f"財測 EPS："
         f"{fmt_num(item.get('epsEstimate'))}",
         f"實際 EPS："
