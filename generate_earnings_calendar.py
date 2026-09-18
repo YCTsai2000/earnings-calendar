@@ -6,8 +6,8 @@
 ============================================================
 
 功能：
-1. 從 Finnhub 取得未來指定天數的財報資料
-2. 只保留 watchlist.txt 中的股票
+1. 逐檔向 Finnhub 查詢 watchlist.txt 中的股票，避免全市場查詢遭截斷
+2. Finnhub 暫時漏資料時，保留上一版 ICS 中仍有效的事件
 3. Finnhub 的 date 視為美國東部時間（America/New_York）的日期
 4. BMO / AMC / DMH 使用概略公布時間
 5. ICS 使用 America/New_York 時區儲存事件，並附上 VTIMEZONE
@@ -50,7 +50,9 @@ ORCL
 import argparse
 import datetime
 import os
+import re
 import sys
+import time
 
 try:
     import requests
@@ -162,67 +164,233 @@ def load_watchlist(path: str) -> set:
 # Finnhub API
 # ============================================================
 
-def fetch_earnings(
+def fetch_symbol_earnings(
+    symbol: str,
     start_date: datetime.date,
     end_date: datetime.date,
-    api_key: str
+    api_key: str,
+    max_retries: int = 3,
 ):
     """
-    一次呼叫 Finnhub，
-    取得指定日期範圍的財報資料。
+    只查詢一檔股票的財報資料。
+
+    Finnhub 偶爾會回傳 429 或暫時性伺服器錯誤；這些情況會重試。
+    回傳後仍再次核對 symbol 與日期範圍，避免 API 忽略篩選參數。
     """
 
     params = {
         "from": start_date.strftime("%Y-%m-%d"),
         "to": end_date.strftime("%Y-%m-%d"),
+        "symbol": symbol,
         "token": api_key,
     }
 
-    try:
+    last_error = None
 
-        resp = requests.get(
-            FINNHUB_URL,
-            params=params,
-            timeout=30
+    for attempt in range(max_retries):
+        resp = None
+
+        try:
+            resp = requests.get(
+                FINNHUB_URL,
+                params=params,
+                timeout=30,
+            )
+        except requests.RequestException as e:
+            last_error = f"連線失敗：{e}"
+        else:
+            if resp.status_code == 401:
+                sys.exit(
+                    "[錯誤] Finnhub 回傳 401："
+                    "API 金鑰無效，請確認 FINNHUB_API_KEY 是否正確"
+                )
+
+            if resp.status_code == 403:
+                sys.exit(
+                    "[錯誤] Finnhub 回傳 403："
+                    "這個端點可能受到方案限制，"
+                    "請登入 Finnhub Dashboard 確認 API 權限"
+                )
+
+            if resp.status_code == 429 or resp.status_code >= 500:
+                last_error = f"HTTP {resp.status_code}"
+            else:
+                try:
+                    resp.raise_for_status()
+                    data = resp.json()
+                except requests.RequestException as e:
+                    raise RuntimeError(
+                        f"{symbol} 查詢失敗：{e}"
+                    ) from e
+                except ValueError as e:
+                    raise RuntimeError(
+                        f"{symbol} 回傳內容不是有效 JSON"
+                    ) from e
+
+                items = []
+
+                for item in data.get("earningsCalendar", []):
+                    item_symbol = (
+                        item.get("symbol", "").upper()
+                    )
+                    date_str = item.get("date", "")
+
+                    try:
+                        item_date = datetime.date.fromisoformat(date_str)
+                    except ValueError:
+                        continue
+
+                    if (
+                        item_symbol == symbol
+                        and start_date <= item_date <= end_date
+                    ):
+                        items.append(item)
+
+                return items
+
+        if attempt < max_retries - 1:
+            retry_after = 2 ** attempt
+            if resp is not None:
+                header_value = resp.headers.get("Retry-After")
+                if header_value and header_value.isdigit():
+                    retry_after = max(retry_after, int(header_value))
+            time.sleep(retry_after)
+
+    raise RuntimeError(
+        f"{symbol} 查詢失敗（重試 {max_retries} 次）：{last_error}"
+    )
+
+
+def fetch_watchlist_earnings(
+    watchlist: set,
+    start_date: datetime.date,
+    end_date: datetime.date,
+    api_key: str,
+    request_delay: float = 0.25,
+):
+    """
+    逐檔查詢觀察名單。
+
+    回傳 (results, errors)：
+    results 的值為 list 代表查詢成功（空 list 表示 Finnhub 沒有資料），
+    值為 None 代表該檔查詢發生暫時性錯誤。
+    """
+
+    results = {}
+    errors = {}
+
+    for index, symbol in enumerate(sorted(watchlist)):
+        if index and request_delay > 0:
+            time.sleep(request_delay)
+
+        try:
+            results[symbol] = fetch_symbol_earnings(
+                symbol,
+                start_date,
+                end_date,
+                api_key,
+            )
+        except RuntimeError as e:
+            results[symbol] = None
+            errors[symbol] = str(e)
+
+    return results, errors
+
+
+# ============================================================
+# 讀取上一版 ICS（資料源暫時漏值時的保護）
+# ============================================================
+
+def load_existing_events(
+    path: str,
+    watchlist: set,
+    start_date: datetime.date,
+    end_date: datetime.date,
+):
+    """
+    讀取上一版 ICS 中仍位於查詢區間的 watchlist 事件。
+
+    保留原始 VEVENT 文字，避免 Finnhub 某天突然漏值時把事件刪除。
+    """
+
+    if not os.path.exists(path):
+        return []
+
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    blocks = re.findall(
+        r"BEGIN:VEVENT\r?\n.*?\r?\nEND:VEVENT",
+        content,
+        flags=re.DOTALL,
+    )
+    events = []
+
+    for block in blocks:
+        unfolded = re.sub(r"\r?\n[ \t]", "", block)
+        uid_match = re.search(
+            r"^UID:earnings-(.+)-(\d{8})@earnings-calendar-script$",
+            unfolded,
+            flags=re.MULTILINE,
         )
 
-    except requests.RequestException as e:
+        if not uid_match:
+            continue
 
-        sys.exit(
-            f"[錯誤] 無法連線到 Finnhub：{e}"
+        symbol = uid_match.group(1).upper()
+
+        try:
+            event_date = datetime.datetime.strptime(
+                uid_match.group(2),
+                "%Y%m%d",
+            ).date()
+        except ValueError:
+            continue
+
+        if (
+            symbol not in watchlist
+            or event_date < start_date
+            or event_date > end_date
+        ):
+            continue
+
+        normalized_block = "\r\n".join(
+            block.replace("\r\n", "\n").splitlines()
         )
+        events.append({
+            "symbol": symbol,
+            "date": event_date,
+            "raw": normalized_block,
+        })
 
-    # API Key 錯誤
-    if resp.status_code == 401:
+    return events
 
-        sys.exit(
-            "[錯誤] Finnhub 回傳 401："
-            "API 金鑰無效，請確認 FINNHUB_API_KEY 是否正確"
-        )
 
-    # 權限問題
-    if resp.status_code == 403:
+def merge_with_existing_events(results: dict, existing_events: list):
+    """
+    成功取得新資料時以 Finnhub 為準；無資料或查詢失敗時保留舊事件。
+    """
 
-        sys.exit(
-            "[錯誤] Finnhub 回傳 403："
-            "這個端點可能受到方案限制，"
-            "請登入 Finnhub Dashboard 確認 API 權限"
-        )
+    fresh_by_key = {}
 
-    # 其他 HTTP 錯誤
-    resp.raise_for_status()
+    for symbol, items in results.items():
+        if not items:
+            continue
 
-    try:
+        for item in items:
+            key = (symbol, item.get("date", ""))
+            fresh_by_key[key] = item
 
-        data = resp.json()
+    preserved = []
 
-    except ValueError:
+    for event in existing_events:
+        if not results.get(event["symbol"]):
+            preserved.append(event)
 
-        sys.exit(
-            "[錯誤] Finnhub 回傳內容不是有效 JSON"
-        )
+    fresh = sorted(fresh_by_key.values(), key=event_sort_key)
+    preserved.sort(key=lambda event: (event["date"], event["symbol"]))
 
-    return data.get("earningsCalendar", [])
+    return fresh, preserved
 
 
 # ============================================================
@@ -698,7 +866,7 @@ def main():
     )
 
     print(
-        f"正在向 Finnhub 查詢 "
+        f"正在逐檔向 Finnhub 查詢 "
         f"{today} 到 {end_date} "
         f"的財報資料..."
     )
@@ -707,47 +875,66 @@ def main():
     # API
     # ========================================================
 
-    raw_items = fetch_earnings(
+    existing_events = load_existing_events(
+        args.output,
+        watchlist,
         today,
         end_date,
-        api_key
+    )
+
+    results, query_errors = fetch_watchlist_earnings(
+        watchlist,
+        today,
+        end_date,
+        api_key,
+    )
+
+    events, preserved_events = merge_with_existing_events(
+        results,
+        existing_events,
     )
 
     print(
-        f"Finnhub 總共回傳 "
-        f"{len(raw_items)} 筆財報資料"
-        f"（含所有美股）"
+        f"逐檔查詢完成：新資料 {len(events)} 筆，"
+        f"異常保留 {len(preserved_events)} 筆"
     )
 
-    # ========================================================
-    # 篩選 watchlist
-    # ========================================================
+    existing_by_symbol = {}
+    for event in preserved_events:
+        existing_by_symbol.setdefault(event["symbol"], []).append(event)
 
-    events = []
+    for symbol in sorted(watchlist):
+        items = results[symbol]
 
-    for item in raw_items:
+        if items:
+            dates = ", ".join(item["date"] for item in items)
+            print(f"[OK]   {symbol:<6} {dates}")
+            continue
 
-        symbol = (
-            item.get("symbol", "")
-            .upper()
-        )
+        preserved_for_symbol = existing_by_symbol.get(symbol, [])
+        if preserved_for_symbol:
+            dates = ", ".join(
+                event["date"].isoformat()
+                for event in preserved_for_symbol
+            )
+            reason = query_errors.get(
+                symbol,
+                "Finnhub 本次未回傳資料",
+            )
+            message = (
+                f"{symbol} {reason}；"
+                f"已保留上一版事件：{dates}"
+            )
+        elif items is None:
+            message = (
+                f"{query_errors[symbol]}，"
+                "且沒有可保留的既有事件"
+            )
+        else:
+            message = f"{symbol} 找不到未來財報日期"
 
-        if symbol in watchlist:
-
-            events.append(item)
-
-    # ========================================================
-    # 排序
-    # ========================================================
-
-    events.sort(
-        key=event_sort_key
-    )
-
-    print(
-        f"篩選後，屬於觀察名單的 "
-        f"財報事件共 {len(events)} 筆"
-    )
+        print(f"[WARN] {message}")
+        print(f"::warning::{message}")
 
     # ========================================================
     # 顯示事件
@@ -802,6 +989,17 @@ def main():
         "------------------------------------------------------------"
     )
 
+    for event in preserved_events:
+        print(
+            f"{event['date'].isoformat()} --:-- ET | "
+            f"{event['symbol']:<6} | 保留上一版事件"
+        )
+
+    if preserved_events:
+        print(
+            "------------------------------------------------------------"
+        )
+
     # ========================================================
     # DTSTAMP
     # ========================================================
@@ -824,7 +1022,7 @@ def main():
 
         "PRODID:"
         "//EarningsCalendarScript"
-        "//Watchlist 2.0"
+        "//Watchlist 3.0"
         "//EN",
 
         "VERSION:2.0",
@@ -903,16 +1101,25 @@ def main():
     # 加入 VEVENT
     # ========================================================
 
+    rendered_events = []
+
     for item in events:
 
-        body += (
-            "\r\n"
-            + build_event(
+        rendered_events.append(
+            build_event(
                 item,
                 now_stamp,
                 args.alarm_hours_before
             )
         )
+
+    rendered_events.extend(
+        event["raw"]
+        for event in preserved_events
+    )
+
+    if rendered_events:
+        body += "\r\n" + "\r\n".join(rendered_events)
 
     # ========================================================
     # 結束 VCALENDAR
@@ -957,7 +1164,7 @@ def main():
     print()
     print(
         f"已產生 "
-        f"{len(events)} 個事件"
+        f"{len(rendered_events)} 個事件"
         f" -> {args.output}"
     )
 
