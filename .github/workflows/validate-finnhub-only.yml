@@ -1,0 +1,40 @@
+name: Validate Finnhub Only
+
+on:
+  push:
+    branches:
+      - simplify-finnhub-only
+    paths-ignore:
+      - "ci-status.txt"
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install requests
+      - name: Run tests
+        id: tests
+        continue-on-error: true
+        run: |
+          python -m unittest discover -s tests -v > test-output.txt 2>&1
+      - name: Record result
+        if: always()
+        run: |
+          {
+            echo "TEST_OUTCOME=${{ steps.tests.outcome }}"
+            echo
+            cat test-output.txt
+          } > ci-status.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add ci-status.txt
+          git commit -m "Record Finnhub-only test status" || true
+          git push
