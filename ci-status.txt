@@ -1,0 +1,16 @@
+TEST_OUTCOME=success
+
+test_query_range_keeps_previous_seven_days (test_generate_earnings_calendar.DateRangeTests.test_query_range_keeps_previous_seven_days) ... ok
+test_actual_results_raise_event_sequence (test_generate_earnings_calendar.EventRenderingTests.test_actual_results_raise_event_sequence) ... ok
+test_all_events_use_one_finnhub_format (test_generate_earnings_calendar.EventRenderingTests.test_all_events_use_one_finnhub_format) ... ok
+test_api_error_temporarily_preserves_existing_event (test_generate_earnings_calendar.ExistingCalendarFallbackTests.test_api_error_temporarily_preserves_existing_event) ... ok
+test_new_finnhub_date_replaces_old_future_date (test_generate_earnings_calendar.ExistingCalendarFallbackTests.test_new_finnhub_date_replaces_old_future_date) ... ok
+test_successful_empty_response_drops_future_event (test_generate_earnings_calendar.ExistingCalendarFallbackTests.test_successful_empty_response_drops_future_event) ... ok
+test_successful_empty_response_keeps_recent_past_event (test_generate_earnings_calendar.ExistingCalendarFallbackTests.test_successful_empty_response_keeps_recent_past_event) ... ok
+test_queries_one_symbol_and_filters_unrelated_rows (test_generate_earnings_calendar.FetchSymbolEarningsTests.test_queries_one_symbol_and_filters_unrelated_rows) ... ok
+test_retries_rate_limit (test_generate_earnings_calendar.FetchSymbolEarningsTests.test_retries_rate_limit) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 0.011s
+
+OK
