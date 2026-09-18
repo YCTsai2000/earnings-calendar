@@ -93,30 +93,109 @@ class ExistingCalendarFallbackTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def test_missing_api_row_preserves_future_existing_event(self):
+    def test_api_error_temporarily_preserves_existing_event(self):
         existing = calendar.load_existing_events(
             str(self.ics_path), {"MU", "ORCL"}, START, END
         )
-        fresh, preserved = calendar.merge_with_existing_events(
-            {"MU": [], "ORCL": []}, existing
+        fresh, preserved = calendar.merge_earnings_events(
+            {"MU": None, "ORCL": []}, [], existing
         )
 
         self.assertEqual(fresh, [])
         self.assertEqual([event["symbol"] for event in preserved], ["MU"])
         self.assertIn("UID:earnings-MU-20260930", preserved[0]["raw"])
 
-    def test_fresh_row_replaces_existing_event_for_symbol(self):
+    def test_successful_empty_response_drops_old_estimate(self):
         existing = calendar.load_existing_events(
             str(self.ics_path), {"MU"}, START, END
         )
-        new_item = {"symbol": "MU", "date": "2026-10-01"}
 
-        fresh, preserved = calendar.merge_with_existing_events(
-            {"MU": [new_item]}, existing
+        fresh, preserved = calendar.merge_earnings_events(
+            {"MU": []}, [], existing
         )
 
-        self.assertEqual(fresh, [new_item])
+        self.assertEqual(fresh, [])
         self.assertEqual(preserved, [])
+
+    def test_official_event_survives_missing_finnhub_row(self):
+        existing = calendar.load_existing_events(
+            str(self.ics_path), {"MU"}, START, END
+        )
+        official = {
+            "symbol": "MU",
+            "date": "2026-09-30",
+            "time": "16:30",
+            "hour": "amc",
+            "quarter": 4,
+            "year": 2026,
+            "_status": calendar.STATUS_OFFICIAL,
+            "_source_name": "Micron Investor Relations",
+            "_source_url": "https://example.com/mu-official",
+        }
+
+        fresh, preserved = calendar.merge_earnings_events(
+            {"MU": []}, [official], existing
+        )
+
+        self.assertEqual(fresh, [official])
+        self.assertEqual(preserved, [])
+
+
+class SourceStatusTests(unittest.TestCase):
+    def test_loads_official_registry(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "official.json"
+            path.write_text(
+                '[{"symbol":"mu","date":"2026-09-30",'
+                '"time":"16:30","hour":"amc","quarter":4,'
+                '"year":2026,"source_url":"https://example.com/mu"}]',
+                encoding="utf-8",
+            )
+
+            events = calendar.load_official_earnings(
+                str(path), {"MU"}, START, END
+            )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["symbol"], "MU")
+        self.assertEqual(events[0]["_status"], calendar.STATUS_OFFICIAL)
+
+    def test_ics_distinguishes_official_and_estimated_events(self):
+        official = calendar.build_event(
+            {
+                "symbol": "MU",
+                "date": "2026-09-30",
+                "time": "16:30",
+                "hour": "amc",
+                "quarter": 4,
+                "year": 2026,
+                "_status": calendar.STATUS_OFFICIAL,
+                "_source_name": "Micron Investor Relations",
+                "_source_url": "https://example.com/mu",
+            },
+            "20260918T000000Z",
+            28,
+        )
+        estimated = calendar.build_event(
+            {
+                "symbol": "TSLA",
+                "date": "2026-10-20",
+                "hour": "amc",
+                "quarter": 3,
+                "year": 2026,
+                "_status": calendar.STATUS_ESTIMATED,
+                "_source_name": "Finnhub",
+            },
+            "20260918T000000Z",
+            28,
+        )
+
+        self.assertIn("【官方確認】MU 財報", official)
+        self.assertIn("STATUS:CONFIRMED", official)
+        self.assertIn("X-EARNINGS-SOURCE-STATUS:OFFICIAL", official)
+        self.assertIn("【第三方預估】TSLA 財報", estimated)
+        self.assertIn("STATUS:TENTATIVE", estimated)
+        self.assertIn("X-EARNINGS-SOURCE-STATUS:ESTIMATED", estimated)
 
 
 if __name__ == "__main__":
