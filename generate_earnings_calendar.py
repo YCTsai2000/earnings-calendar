@@ -796,7 +796,7 @@ def build_event(
 
     time_line = (
         (
-            "官方美東時間："
+            "美東時間："
             if is_official and item.get("time")
             else "概略美東時間："
         )
@@ -804,23 +804,17 @@ def build_event(
         f"({US_TIMEZONE})"
     )
 
-    note_line = (
-        "注意：日期與時間已由公司官方公告確認。"
-        if is_official
-        else "注意：日期與時間尚未獲公司官方確認，可能變動。"
-    )
+    if is_official and item.get("time"):
+        note_line = "注意：日期與時間已由公司官方公告確認。"
+    elif is_official:
+        note_line = "注意：日期已由公司官方公告確認；時間為概略值。"
+    else:
+        note_line = "注意：日期與時間尚未獲公司官方確認，可能變動。"
 
     description_lines = [
         f"股票代號：{symbol}",
+        f"資料來源：{source_name}",
     ]
-
-    # 官方來源只供程式驗證與判定，不放入行事曆附註，
-    # 避免官方事件同時顯示來源名稱與公告網址而顯得雜亂。
-    # 第三方預估仍保留資料來源，讓使用者知道預估資料來自何處。
-    if not is_official:
-        description_lines.extend([
-            f"資料來源：{source_name}",
-        ])
 
     description_lines.extend([
         time_line,
