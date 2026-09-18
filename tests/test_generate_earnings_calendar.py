@@ -254,7 +254,7 @@ class SourceStatusTests(unittest.TestCase):
         self.assertNotIn("【預估】", official_unfolded)
         self.assertIn("STATUS:CONFIRMED", official)
         self.assertIn("X-EARNINGS-SOURCE-STATUS:OFFICIAL", official)
-        self.assertNotIn(
+        self.assertIn(
             "資料來源：Micron Investor Relations", official_unfolded
         )
         self.assertNotIn("官方來源：", official_unfolded)
@@ -262,6 +262,23 @@ class SourceStatusTests(unittest.TestCase):
         self.assertNotIn("資料狀態：", official_unfolded)
         self.assertNotIn("美東日期：", official_unfolded)
         self.assertNotIn("公布時段：", official_unfolded)
+
+        official_description = next(
+            line
+            for line in official_unfolded.split("\r\n")
+            if line.startswith("DESCRIPTION:")
+        )
+        self.assertEqual(
+            official_description,
+            "DESCRIPTION:股票代號：MU\\n"
+            "資料來源：Micron Investor Relations\\n"
+            "美東時間：2026-09-30 16:30 (America/New_York)\\n"
+            "注意：日期與時間已由公司官方公告確認。\\n"
+            "財測 EPS：無資料\\n"
+            "實際 EPS：無資料\\n"
+            "財測營收：無資料\\n"
+            "實際營收：無資料",
+        )
         self.assertIn(
             "SUMMARY:TSLA 財報 (Q3 2026)【預估】",
             estimated_unfolded,
@@ -312,6 +329,27 @@ class SourceStatusTests(unittest.TestCase):
         self.assertIn("SEQUENCE:1", event)
         self.assertIn("實際 EPS：0.52", event)
         self.assertIn("實際營收：28\\,265\\,984\\,061", event)
+
+    def test_official_date_without_exact_time_marks_time_as_approximate(self):
+        event = calendar.build_event(
+            {
+                "symbol": "MU",
+                "date": "2026-09-30",
+                "hour": "amc",
+                "quarter": 4,
+                "year": 2026,
+                "_status": calendar.STATUS_OFFICIAL,
+                "_source_name": "Micron Investor Relations",
+            },
+            "20260918T000000Z",
+            28,
+        ).replace("\r\n ", "")
+
+        self.assertIn("概略美東時間：", event)
+        self.assertIn(
+            "注意：日期已由公司官方公告確認；時間為概略值。",
+            event,
+        )
 
 
 if __name__ == "__main__":
