@@ -199,6 +199,7 @@ class SourceStatusTests(unittest.TestCase):
             "資料來源：Micron Investor Relations", official_unfolded
         )
         self.assertNotIn("官方來源：", official_unfolded)
+        self.assertNotIn("URL:https://example.com/mu", official_unfolded)
         self.assertIn("【第三方預估】TSLA 財報", estimated)
         self.assertIn("STATUS:TENTATIVE", estimated)
         self.assertIn("X-EARNINGS-SOURCE-STATUS:ESTIMATED", estimated)

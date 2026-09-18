@@ -754,7 +754,6 @@ def build_event(
         "_source_name",
         "Finnhub",
     )
-    source_url = item.get("_source_url", "")
     is_official = source_status == STATUS_OFFICIAL
 
     summary = (
@@ -893,12 +892,6 @@ def build_event(
 
         "END:VEVENT",
     ]
-
-    if source_url:
-        lines.insert(
-            lines.index("TRANSP:OPAQUE"),
-            f"URL:{source_url}",
-        )
 
     return "\r\n".join(
         fold_line(line)
