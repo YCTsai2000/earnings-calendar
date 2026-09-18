@@ -74,6 +74,7 @@ jobs:
 
         run: |
           python3 generate_earnings_calendar.py \
+            --days-behind 7 \
             --days-ahead 45 \
             --alarm-hours-before 28
 
