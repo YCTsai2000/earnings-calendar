@@ -772,9 +772,39 @@ def load_existing_events(
         normalized_block = "\r\n".join(
             block.replace("\r\n", "\n").splitlines()
         )
+
+        status_match = re.search(
+            r"^X-EARNINGS-SOURCE-STATUS:(OFFICIAL|ESTIMATED)$",
+            unfolded,
+            flags=re.MULTILINE,
+        )
+        existing_status = (
+            status_match.group(1).lower()
+            if status_match
+            else STATUS_ESTIMATED
+        )
+
+        source_match = re.search(
+            r"資料來源：(.*?)(?:\\n|$)",
+            unfolded,
+        )
+        source_name = (
+            source_match.group(1).strip()
+            if source_match
+            else ""
+        )
+        source_name = (
+            source_name
+            .replace(r"\\,", ",")
+            .replace(r"\\;", ";")
+            .replace(r"\\\\", "\\")
+        )
+
         events.append({
             "symbol": symbol,
             "date": event_date,
+            "status": existing_status,
+            "source_name": source_name,
             "raw": normalized_block,
         })
 
@@ -790,21 +820,39 @@ def merge_earnings_events(
     """
     官方事件優先；其他事件標為第三方預估。
 
+    已經由官方公告驗證過的事件，會把「官方」狀態保存在上一版 ICS
+    中。即使某一天 company-news 暫時漏掉公告，只要 Finnhub 候選日期
+    仍相同，就沿用既有官方狀態，不需要額外維護 JSON。
+
+    如果 Finnhub 預估日期改變，但公司沒有發布新的官方公告，舊的官方
+    事件仍保留，避免第三方預估反向覆蓋已確認資訊。只有偵測到同一公司
+    新的官方公告時，才允許新的官方事件取代舊官方日期。
+
     API 明確查詢失敗（值為 None）時暫時保留上一版事件。
-    已到公布日且仍在查詢區間內的事件也會保留，避免 Finnhub
+    已到公布日且仍在查詢區間內的預估事件也會保留，避免 Finnhub
     暫時漏值時讓財報在七天保留期間內提早消失。
-    尚未到公布日且 Finnhub 成功回傳空資料時，則移除舊預估日期。
     """
 
     if today is None:
         today = datetime.date.today()
 
     fresh_by_key = {}
-    official_symbols = {
+
+    current_verified_official_symbols = {
         item["symbol"]
         for item in official_events
     }
 
+    existing_official_by_key = {
+        (
+            event["symbol"],
+            event["date"].isoformat(),
+        ): event
+        for event in existing_events
+        if event.get("status") == STATUS_OFFICIAL
+    }
+
+    # 本次 company-news 成功重新驗證的官方事件具有最高優先權。
     for official_item in official_events:
         symbol = official_item["symbol"]
         api_items = results.get(symbol) or []
@@ -823,15 +871,37 @@ def merge_earnings_events(
         key = (symbol, merged_item["date"])
         fresh_by_key[key] = merged_item
 
+    # 其他 Finnhub 候選日期：
+    # - 與上一版已驗證官方日期相同 -> 沿用官方狀態
+    # - 從未驗證過 -> 維持第三方預估
     for symbol, items in results.items():
-        if symbol in official_symbols or not items:
+        if not items:
             continue
 
         for item in items:
+            key = (symbol, item.get("date", ""))
+
+            if key in fresh_by_key:
+                continue
+
+            existing_official = existing_official_by_key.get(key)
+
+            if existing_official:
+                persisted_official = dict(item)
+                persisted_official["_status"] = STATUS_OFFICIAL
+                persisted_official["_source_name"] = (
+                    existing_official.get("source_name")
+                    or "公司官方公告（已驗證）"
+                )
+                # 上一版的官方狀態只證明日期已驗證。
+                # 不自行宣稱精確發布分鐘，時間仍採 Finnhub 時段概略值。
+                persisted_official.pop("time", None)
+                fresh_by_key[key] = persisted_official
+                continue
+
             estimated_item = dict(item)
             estimated_item["_status"] = STATUS_ESTIMATED
             estimated_item["_source_name"] = "Finnhub"
-            key = (symbol, estimated_item.get("date", ""))
             fresh_by_key[key] = estimated_item
 
     preserved = []
@@ -840,7 +910,16 @@ def merge_earnings_events(
         symbol = event["symbol"]
         event_key = (symbol, event["date"].isoformat())
 
-        if event_key in fresh_by_key or symbol in official_symbols:
+        if event_key in fresh_by_key:
+            continue
+
+        # 舊事件已驗證為官方，而這次沒有找到同公司的「新官方公告」：
+        # 保留舊官方事件，不讓第三方預估日期把它覆蓋掉。
+        if (
+            event.get("status") == STATUS_OFFICIAL
+            and symbol not in current_verified_official_symbols
+        ):
+            preserved.append(event)
             continue
 
         api_items = results.get(symbol)
