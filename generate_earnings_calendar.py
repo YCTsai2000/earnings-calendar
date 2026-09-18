@@ -756,9 +756,15 @@ def build_event(
     )
     is_official = source_status == STATUS_OFFICIAL
 
+    title_suffix = (
+        ""
+        if is_official
+        else "【預估】"
+    )
     summary = (
-        f"【{status_label}】{symbol} 財報 "
+        f"{symbol} 財報 "
         f"(Q{quarter} {year})"
+        f"{title_suffix}"
     )
 
     # --------------------------------------------------------
