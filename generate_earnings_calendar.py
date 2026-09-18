@@ -8,13 +8,14 @@
 功能：
 1. 逐檔向 Finnhub 查詢 watchlist.txt 中的股票，避免全市場查詢遭截斷
 2. 以 official_earnings.json 記錄公司官方公告確認的事件
-3. 在行事曆標示「官方確認」或「第三方預估」
-4. 只有 API 查詢失敗時，才暫時沿用上一版仍有效的事件
-5. Finnhub 的 date 視為美國東部時間（America/New_York）的日期
-6. BMO / AMC / DMH 使用概略公布時間
-7. ICS 使用 America/New_York 時區儲存事件，並附上 VTIMEZONE
+3. 第三方預估事件在標題尾端標示「預估」，官方事件不加贅字
+4. 財報公布後保留七天，等待 Finnhub 補入實際 EPS 與營收
+5. 只有 API 查詢失敗時，才暫時沿用上一版仍有效的事件
+6. Finnhub 的 date 視為美國東部時間（America/New_York）的日期
+7. BMO / AMC / DMH 使用概略公布時間
+8. ICS 使用 America/New_York 時區儲存事件，並附上 VTIMEZONE
    （EST/EDT 日光節約時間規則），符合 RFC 5545 規範
-8. Google Calendar / Apple Calendar / Outlook
+9. Google Calendar / Apple Calendar / Outlook
    會依照使用者自己的行事曆時區自動轉換
 
 時段概略時間：
@@ -56,6 +57,8 @@ import os
 import re
 import sys
 import time
+from decimal import Decimal, InvalidOperation
+from zoneinfo import ZoneInfo
 
 try:
     import requests
@@ -468,13 +471,19 @@ def merge_earnings_events(
     results: dict,
     official_events: list,
     existing_events: list,
+    today: datetime.date = None,
 ):
     """
     官方事件優先；其他事件標為第三方預估。
 
-    只有 API 明確查詢失敗（值為 None）時才暫時保留上一版事件。
-    Finnhub 成功回傳空資料時，不保留舊的第三方預估日期。
+    API 明確查詢失敗（值為 None）時暫時保留上一版事件。
+    已到公布日且仍在查詢區間內的事件也會保留，避免 Finnhub
+    暫時漏值時讓財報在七天保留期間內提早消失。
+    尚未到公布日且 Finnhub 成功回傳空資料時，則移除舊預估日期。
     """
+
+    if today is None:
+        today = datetime.date.today()
 
     fresh_by_key = {}
     official_symbols = {
@@ -515,7 +524,13 @@ def merge_earnings_events(
 
     for event in existing_events:
         symbol = event["symbol"]
-        if symbol not in official_symbols and results.get(symbol) is None:
+        event_key = (symbol, event["date"].isoformat())
+
+        if event_key in fresh_by_key or symbol in official_symbols:
+            continue
+
+        api_items = results.get(symbol)
+        if api_items is None or event["date"] <= today:
             preserved.append(event)
 
     fresh = sorted(fresh_by_key.values(), key=event_sort_key)
@@ -606,6 +621,30 @@ def fmt_num(x):
     return str(x)
 
 
+def fmt_revenue(x):
+    """
+    營收以千分位顯示；None / 空字串 → 無資料。
+    """
+
+    if x is None or x == "":
+        return "無資料"
+
+    try:
+        value = Decimal(str(x))
+    except (InvalidOperation, ValueError):
+        return str(x)
+
+    if not value.is_finite():
+        return str(x)
+
+    formatted = format(value, ",f")
+
+    if "." in formatted:
+        formatted = formatted.rstrip("0").rstrip(".")
+
+    return formatted
+
+
 # ============================================================
 # 建立美東時間
 # ============================================================
@@ -652,8 +691,6 @@ def get_us_eastern_datetime(item: dict) -> datetime.datetime:
     # Python 的 zoneinfo / ICS 使用 IANA 時區
     # 美國東部：
     # America/New_York
-    from zoneinfo import ZoneInfo
-
     us_tz = ZoneInfo(US_TIMEZONE)
 
     us_dt = datetime.datetime.combine(
@@ -703,16 +740,6 @@ def build_event(
 
     us_date = us_dt.date()
 
-    hour_code = (
-        item.get("hour", "")
-        or ""
-    ).lower()
-
-    hour_label = HOUR_LABEL.get(
-        hour_code,
-        "時間未公布"
-    )
-
     # --------------------------------------------------------
     # ICS DTSTART
     #
@@ -746,10 +773,6 @@ def build_event(
         "_status",
         STATUS_ESTIMATED,
     )
-    status_label = STATUS_LABEL.get(
-        source_status,
-        STATUS_LABEL[STATUS_ESTIMATED],
-    )
     source_name = item.get(
         "_source_name",
         "Finnhub",
@@ -771,56 +794,61 @@ def build_event(
     # DESCRIPTION
     # --------------------------------------------------------
 
-    description_lines = [
-
-        f"股票代號：{symbol}",
-
-        f"資料狀態：{status_label}",
-
-        f"美東日期："
-        f"{us_date.isoformat()}",
-
-        f"公布時段："
-        f"{hour_label}",
-
-        (
-            "注意：日期與時間已由公司官方公告確認。"
-            if is_official
-            else "注意：日期與時間尚未獲公司官方確認，可能變動。"
-        ),
-
+    time_line = (
         (
             "官方美東時間："
             if is_official and item.get("time")
             else "概略美東時間："
         )
         + f"{us_dt.strftime('%Y-%m-%d %H:%M')} "
-        f"({US_TIMEZONE})",
+        f"({US_TIMEZONE})"
+    )
 
-        f"財測 EPS："
-        f"{fmt_num(item.get('epsEstimate'))}",
+    note_line = (
+        "注意：日期與時間已由公司官方公告確認。"
+        if is_official
+        else "注意：日期與時間尚未獲公司官方確認，可能變動。"
+    )
 
-        f"實際 EPS："
-        f"{fmt_num(item.get('epsActual'))}",
-
-        f"財測營收："
-        f"{fmt_num(item.get('revenueEstimate'))}",
-
-        f"實際營收："
-        f"{fmt_num(item.get('revenueActual'))}",
+    description_lines = [
+        f"股票代號：{symbol}",
+        "",
     ]
 
     # 官方來源只供程式驗證與判定，不放入行事曆附註，
     # 避免官方事件同時顯示來源名稱與公告網址而顯得雜亂。
     # 第三方預估仍保留資料來源，讓使用者知道預估資料來自何處。
     if not is_official:
-        description_lines.insert(
-            2,
+        description_lines.extend([
             f"資料來源：{source_name}",
-        )
+            "",
+        ])
+
+    description_lines.extend([
+        time_line,
+        note_line,
+        "",
+        f"財測 EPS："
+        f"{fmt_num(item.get('epsEstimate'))}",
+        f"實際 EPS："
+        f"{fmt_num(item.get('epsActual'))}",
+        f"財測營收："
+        f"{fmt_revenue(item.get('revenueEstimate'))}",
+        f"實際營收："
+        f"{fmt_revenue(item.get('revenueActual'))}",
+    ])
 
     description = "\n".join(
         description_lines
+    )
+
+    has_actual_results = any(
+        item.get(field) not in (None, "")
+        for field in ("epsActual", "revenueActual")
+    )
+    sequence = (
+        (1 if is_official else 0)
+        + (1 if has_actual_results else 0)
     )
 
     # --------------------------------------------------------
@@ -864,7 +892,7 @@ def build_event(
 
         f"LAST-MODIFIED:{now_stamp}",
 
-        f"SEQUENCE:{1 if is_official else 0}",
+        f"SEQUENCE:{sequence}",
 
         (
             "STATUS:CONFIRMED"
@@ -928,6 +956,25 @@ def event_sort_key(item: dict):
 
 
 # ============================================================
+# 查詢日期範圍
+# ============================================================
+
+def get_query_date_range(
+    today: datetime.date,
+    days_behind: int,
+    days_ahead: int,
+):
+    """
+    財報公布後仍保留 days_behind 天，並查詢未來 days_ahead 天。
+    """
+
+    return (
+        today - datetime.timedelta(days=days_behind),
+        today + datetime.timedelta(days=days_ahead),
+    )
+
+
+# ============================================================
 # 主程式
 # ============================================================
 
@@ -968,6 +1015,16 @@ def main():
     )
 
     parser.add_argument(
+        "--days-behind",
+        type=int,
+        default=7,
+        help=(
+            "財報公布後保留幾天"
+            "（預設 7 天）"
+        ),
+    )
+
+    parser.add_argument(
         "--output",
         type=str,
         default="docs/earnings.ics",
@@ -996,6 +1053,12 @@ def main():
 
         sys.exit(
             "[錯誤] --days-ahead 不可以小於 0"
+        )
+
+    if args.days_behind < 0:
+
+        sys.exit(
+            "[錯誤] --days-behind 不可以小於 0"
         )
 
     if args.alarm_hours_before < 0:
@@ -1045,18 +1108,19 @@ def main():
     # 日期範圍
     # ========================================================
 
-    today = datetime.date.today()
+    today = datetime.datetime.now(
+        ZoneInfo(US_TIMEZONE)
+    ).date()
 
-    end_date = (
-        today
-        + datetime.timedelta(
-            days=args.days_ahead
-        )
+    start_date, end_date = get_query_date_range(
+        today,
+        args.days_behind,
+        args.days_ahead,
     )
 
     print(
         f"正在逐檔向 Finnhub 查詢 "
-        f"{today} 到 {end_date} "
+        f"{start_date} 到 {end_date} "
         f"的財報資料..."
     )
 
@@ -1067,20 +1131,20 @@ def main():
     existing_events = load_existing_events(
         args.output,
         watchlist,
-        today,
+        start_date,
         end_date,
     )
 
     official_events = load_official_earnings(
         args.official_events,
         watchlist,
-        today,
+        start_date,
         end_date,
     )
 
     results, query_errors = fetch_watchlist_earnings(
         watchlist,
-        today,
+        start_date,
         end_date,
         api_key,
     )
@@ -1089,6 +1153,7 @@ def main():
         results,
         official_events,
         existing_events,
+        today,
     )
 
     official_count = sum(
@@ -1151,7 +1216,7 @@ def main():
                 "且沒有可保留的既有事件"
             )
         else:
-            message = f"{symbol} 找不到未來財報日期"
+            message = f"{symbol} 找不到查詢區間內的財報日期"
 
         print(f"[WARN] {message}")
         print(f"::warning::{message}")
