@@ -189,13 +189,20 @@ class SourceStatusTests(unittest.TestCase):
             "20260918T000000Z",
             28,
         )
+        official_unfolded = official.replace("\r\n ", "")
+        estimated_unfolded = estimated.replace("\r\n ", "")
 
         self.assertIn("【官方確認】MU 財報", official)
         self.assertIn("STATUS:CONFIRMED", official)
         self.assertIn("X-EARNINGS-SOURCE-STATUS:OFFICIAL", official)
+        self.assertNotIn(
+            "資料來源：Micron Investor Relations", official_unfolded
+        )
+        self.assertNotIn("官方來源：", official_unfolded)
         self.assertIn("【第三方預估】TSLA 財報", estimated)
         self.assertIn("STATUS:TENTATIVE", estimated)
         self.assertIn("X-EARNINGS-SOURCE-STATUS:ESTIMATED", estimated)
+        self.assertIn("資料來源：Finnhub", estimated_unfolded)
 
 
 if __name__ == "__main__":
