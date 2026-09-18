@@ -1108,9 +1108,9 @@ def main():
     # 日期範圍
     # ========================================================
 
-    today = datetime.datetime.now(
-        ZoneInfo(US_TIMEZONE)
-    ).date()
+    # GitHub Actions 於 UTC 00:00 執行；沿用 UTC 日曆日作為
+    # 45 天前瞻區間的基準，避免台灣早上更新時少抓最遠端一天。
+    today = datetime.date.today()
 
     start_date, end_date = get_query_date_range(
         today,
