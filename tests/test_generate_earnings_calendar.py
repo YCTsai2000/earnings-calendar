@@ -78,6 +78,115 @@ class FetchSymbolEarningsTests(unittest.TestCase):
         sleep.assert_called_once_with(1)
 
 
+class OfficialAnnouncementDetectionTests(unittest.TestCase):
+    def setUp(self):
+        self.api_item = {
+            "symbol": "MU",
+            "date": "2026-09-30",
+            "hour": "amc",
+            "quarter": 4,
+            "year": 2026,
+            "epsEstimate": 32.2164,
+        }
+
+    def test_company_press_release_promotes_matching_candidate(self):
+        news = [{
+            "headline": (
+                "Micron Technology to Report Fiscal Fourth Quarter "
+                "Results on September 30, 2026"
+            ),
+            "summary": (
+                "Micron today announced that it will report results "
+                "after market close on September 30, 2026."
+            ),
+            "source": "GlobeNewswire",
+            "url": "https://www.globenewswire.com/example",
+        }]
+
+        official = calendar.find_official_confirmations_for_symbol(
+            "MU",
+            [self.api_item],
+            news,
+        )
+
+        self.assertEqual(len(official), 1)
+        self.assertEqual(
+            official[0]["_status"],
+            calendar.STATUS_OFFICIAL,
+        )
+        self.assertEqual(official[0]["_source_name"], "GlobeNewswire")
+        self.assertEqual(official[0]["hour"], "amc")
+        self.assertNotIn("time", official[0])
+
+    def test_media_speculation_is_not_promoted(self):
+        news = [{
+            "headline": (
+                "Micron to report fiscal fourth quarter results "
+                "on September 30, 2026"
+            ),
+            "summary": (
+                "Analysts expect Micron to report on "
+                "September 30, 2026."
+            ),
+            "source": "Reuters",
+            "url": "https://www.reuters.com/example",
+        }]
+
+        official = calendar.find_official_confirmations_for_symbol(
+            "MU",
+            [self.api_item],
+            news,
+        )
+
+        self.assertEqual(official, [])
+
+    def test_mismatched_announcement_date_is_not_promoted(self):
+        news = [{
+            "headline": (
+                "Micron Technology to Report Fiscal Fourth Quarter "
+                "Results on October 1, 2026"
+            ),
+            "summary": (
+                "Micron today announced that it will report results "
+                "after market close on October 1, 2026."
+            ),
+            "source": "Business Wire",
+            "url": "https://www.businesswire.com/example",
+        }]
+
+        official = calendar.find_official_confirmations_for_symbol(
+            "MU",
+            [self.api_item],
+            news,
+        )
+
+        self.assertEqual(official, [])
+
+    @patch.object(calendar.requests, "get")
+    def test_company_news_query_uses_lookback_window(self, get):
+        get.return_value = response(
+            200,
+            [{
+                "headline": (
+                    "Micron Technology to Report Fiscal Fourth Quarter "
+                    "Results on September 30, 2026"
+                )
+            }],
+        )
+
+        items = calendar.fetch_symbol_company_news(
+            "MU",
+            START,
+            "test-key",
+        )
+
+        self.assertEqual(len(items), 1)
+        params = get.call_args.kwargs["params"]
+        self.assertEqual(params["symbol"], "MU")
+        self.assertEqual(params["to"], "2026-09-18")
+        self.assertEqual(params["from"], "2026-05-21")
+
+
 class ExistingCalendarFallbackTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -192,24 +301,6 @@ class ExistingCalendarFallbackTests(unittest.TestCase):
 
 
 class SourceStatusTests(unittest.TestCase):
-    def test_loads_official_registry(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            path = Path(temp_dir) / "official.json"
-            path.write_text(
-                '[{"symbol":"mu","date":"2026-09-30",'
-                '"time":"16:30","hour":"amc","quarter":4,'
-                '"year":2026,"source_url":"https://example.com/mu"}]',
-                encoding="utf-8",
-            )
-
-            events = calendar.load_official_earnings(
-                str(path), {"MU"}, START, END
-            )
-
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0]["symbol"], "MU")
-        self.assertEqual(events[0]["_status"], calendar.STATUS_OFFICIAL)
-
     def test_ics_distinguishes_official_and_estimated_events(self):
         official = calendar.build_event(
             {

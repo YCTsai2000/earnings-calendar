@@ -7,8 +7,8 @@
 
 功能：
 1. 逐檔向 Finnhub 查詢 watchlist.txt 中的股票，避免全市場查詢遭截斷
-2. 以 official_earnings.json 記錄公司官方公告確認的事件
-3. 第三方預估事件在標題尾端標示「預估」，官方事件不加贅字
+2. 自動從 Finnhub company-news 尋找公司發布的財報日期公告並交叉驗證
+3. 第三方預估事件在標題尾端標示「預估」，驗證為官方公告的事件不加贅字
 4. 財報公布後保留七天，等待 Finnhub 補入實際 EPS 與營收
 5. 只有 API 查詢失敗時，才暫時沿用上一版仍有效的事件
 6. Finnhub 的 date 視為美國東部時間（America/New_York）的日期
@@ -52,12 +52,12 @@ ORCL
 
 import argparse
 import datetime
-import json
 import os
 import re
 import sys
 import time
 from decimal import Decimal, InvalidOperation
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 try:
@@ -74,6 +74,27 @@ except ImportError:
 # ============================================================
 
 FINNHUB_URL = "https://finnhub.io/api/v1/calendar/earnings"
+FINNHUB_COMPANY_NEWS_URL = "https://finnhub.io/api/v1/company-news"
+
+OFFICIAL_NEWS_LOOKBACK_DAYS = 120
+
+TRUSTED_PRESS_RELEASE_SOURCES = (
+    "business wire",
+    "businesswire",
+    "globenewswire",
+    "globe newswire",
+    "pr newswire",
+    "accesswire",
+    "newsfile",
+)
+
+TRUSTED_PRESS_RELEASE_HOSTS = (
+    "businesswire.com",
+    "globenewswire.com",
+    "prnewswire.com",
+    "accesswire.com",
+    "newsfilecorp.com",
+)
 
 STATUS_OFFICIAL = "official"
 STATUS_ESTIMATED = "estimated"
@@ -175,90 +196,383 @@ def load_watchlist(path: str) -> set:
 
 
 # ============================================================
-# 官方財報公告
+# 自動辨識公司官方財報公告
 # ============================================================
 
-def load_official_earnings(
-    path: str,
-    watchlist: set,
-    start_date: datetime.date,
-    end_date: datetime.date,
-):
+OFFICIAL_ANNOUNCEMENT_HEADLINE_PATTERNS = (
+    re.compile(
+        r"\b(?:to|will)\s+(?:report|release|announce)\b"
+        r".{0,180}\b(?:results?|earnings)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:announces?|releases?|sets?|schedules?)\b"
+        r".{0,100}\b(?:date|timing)\b"
+        r".{0,160}\b(?:results?|earnings)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:announces?|sets?|schedules?)\b"
+        r".{0,180}\b(?:earnings|financial results|quarterly results)\b"
+        r".{0,100}\b(?:conference call|webcast|release)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:earnings|financial results|quarterly results)\b"
+        r".{0,120}\b(?:scheduled|set)\b",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _news_text(news_item: dict) -> str:
+    return " ".join(
+        str(news_item.get(field, "") or "")
+        for field in ("headline", "summary")
+    ).strip()
+
+
+def headline_looks_like_official_announcement(headline: str) -> bool:
+    return any(
+        pattern.search(headline or "")
+        for pattern in OFFICIAL_ANNOUNCEMENT_HEADLINE_PATTERNS
+    )
+
+
+def news_looks_company_issued(news_item: dict) -> bool:
     """
-    讀取經公司 Investor Relations 公告確認的財報事件。
+    僅把「公司自己發布／由正式新聞稿平台轉載」的內容視為可驗證來源。
 
-    官方事件不依賴 Finnhub；只要仍在查詢期間內就會寫入 ICS。
+    這個判斷刻意偏保守：寧可漏掉一筆官方確認、保留為預估，
+    也不要把媒體推測誤標成官方公告。
     """
 
-    if not os.path.exists(path):
-        sys.exit(f"[錯誤] 找不到官方財報資料檔：{path}")
+    source = str(news_item.get("source", "") or "").strip().lower()
+    url = str(news_item.get("url", "") or "").strip()
+    summary = str(news_item.get("summary", "") or "").lower()
 
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        sys.exit(f"[錯誤] 無法讀取官方財報資料：{e}")
+    if any(name in source for name in TRUSTED_PRESS_RELEASE_SOURCES):
+        return True
 
-    if not isinstance(data, list):
-        sys.exit("[錯誤] 官方財報資料必須是 JSON 陣列")
+    host = urlparse(url).hostname or ""
+    host = host.lower().removeprefix("www.")
 
-    events = []
-    seen = set()
+    if any(
+        host == trusted_host or host.endswith("." + trusted_host)
+        for trusted_host in TRUSTED_PRESS_RELEASE_HOSTS
+    ):
+        return True
 
-    for index, raw_item in enumerate(data, start=1):
-        if not isinstance(raw_item, dict):
-            sys.exit(f"[錯誤] 官方財報第 {index} 筆不是物件")
+    if (
+        host.startswith(("investor.", "investors.", "ir."))
+        or ".investor." in host
+        or ".investors." in host
+    ):
+        return True
 
-        item = dict(raw_item)
-        symbol = str(item.get("symbol", "")).upper().strip()
-        date_str = str(item.get("date", "")).strip()
-        source_url = str(item.get("source_url", "")).strip()
+    company_markers = (
+        "today announced",
+        "announced today",
+        "the company will report",
+        "the company will release",
+        "the company will announce",
+        "will host a conference call",
+        "will host a webcast",
+        "investor relations",
+    )
+
+    return any(marker in summary for marker in company_markers)
+
+
+def text_mentions_candidate_date(
+    text: str,
+    candidate_date: datetime.date,
+) -> bool:
+    """
+    確認公告文字是否明確提到 Finnhub 候選日期。
+
+    只接受有年份的日期格式，避免把新聞中其他月份日期誤配到
+    財報候選事件。
+    """
+
+    month_full = candidate_date.strftime("%B")
+    month_abbr = candidate_date.strftime("%b")
+    day = candidate_date.day
+    year = candidate_date.year
+
+    named_month_pattern = re.compile(
+        rf"\b(?:{re.escape(month_full)}|{re.escape(month_abbr)}\.?)"
+        rf"\s+0?{day}(?:st|nd|rd|th)?"
+        rf"(?:\s*,\s*|\s+){year}\b",
+        re.IGNORECASE,
+    )
+
+    numeric_pattern = re.compile(
+        rf"\b0?{candidate_date.month}/0?{day}/{year}\b"
+    )
+
+    iso_pattern = re.compile(
+        rf"\b{re.escape(candidate_date.isoformat())}\b"
+    )
+
+    return any(
+        pattern.search(text or "")
+        for pattern in (
+            named_month_pattern,
+            numeric_pattern,
+            iso_pattern,
+        )
+    )
+
+
+def infer_hour_from_announcement(
+    text: str,
+    fallback_hour: str = "",
+) -> str:
+    """
+    從公司公告中的市場時段描述推斷 bmo / amc / dmh。
+
+    這裡不把電話會議或 webcast 的時間誤當成財報發布精確時間；
+    因此只辨識「盤前／盤後／盤中」語意，實際 ICS 仍使用概略時間。
+    """
+
+    normalized = (text or "").lower()
+
+    after_close_markers = (
+        "after market close",
+        "after the market close",
+        "after markets close",
+        "after the markets close",
+        "following market close",
+        "following the market close",
+    )
+    before_open_markers = (
+        "before market open",
+        "before the market open",
+        "before markets open",
+        "before the markets open",
+        "prior to market open",
+        "prior to the market open",
+    )
+    during_market_markers = (
+        "during market hours",
+        "during the trading day",
+    )
+
+    if any(marker in normalized for marker in after_close_markers):
+        return "amc"
+
+    if any(marker in normalized for marker in before_open_markers):
+        return "bmo"
+
+    if any(marker in normalized for marker in during_market_markers):
+        return "dmh"
+
+    return str(fallback_hour or "").lower()
+
+
+def find_official_confirmations_for_symbol(
+    symbol: str,
+    api_items: list,
+    news_items: list,
+) -> list:
+    """
+    將 Finnhub 財報候選日期與近期 company-news 交叉驗證。
+
+    驗證條件：
+    1. 新聞標題具有公司主動公告財報日期的語氣
+    2. 來源看起來是公司 IR 或正式新聞稿通路
+    3. 公告文字明確出現與 Finnhub 候選事件相同的日期
+
+    三者同時成立才升級為官方確認。
+    """
+
+    confirmations = []
+
+    for api_item in api_items or []:
+        date_str = str(api_item.get("date", "") or "")
 
         try:
-            event_date = datetime.date.fromisoformat(date_str)
+            candidate_date = datetime.date.fromisoformat(date_str)
         except ValueError:
-            sys.exit(
-                f"[錯誤] 官方財報第 {index} 筆日期格式錯誤：{date_str}"
-            )
-
-        exact_time = str(item.get("time", "")).strip()
-        if exact_time:
-            try:
-                datetime.time.fromisoformat(exact_time)
-            except ValueError:
-                sys.exit(
-                    f"[錯誤] 官方財報第 {index} 筆時間格式錯誤："
-                    f"{exact_time}"
-                )
-
-        if not symbol or not source_url:
-            sys.exit(
-                f"[錯誤] 官方財報第 {index} 筆缺少 symbol 或 source_url"
-            )
-
-        key = (symbol, date_str)
-        if key in seen:
-            sys.exit(f"[錯誤] 官方財報重複：{symbol} {date_str}")
-        seen.add(key)
-
-        if (
-            symbol not in watchlist
-            or event_date < start_date
-            or event_date > end_date
-        ):
             continue
 
-        item["symbol"] = symbol
-        item["date"] = date_str
-        item["_status"] = STATUS_OFFICIAL
-        item["_source_name"] = item.get(
-            "source_name",
-            "公司官方 Investor Relations",
-        )
-        item["_source_url"] = source_url
-        events.append(item)
+        for news_item in news_items or []:
+            headline = str(news_item.get("headline", "") or "")
 
-    return events
+            if not headline_looks_like_official_announcement(headline):
+                continue
+
+            if not news_looks_company_issued(news_item):
+                continue
+
+            announcement_text = _news_text(news_item)
+
+            if not text_mentions_candidate_date(
+                announcement_text,
+                candidate_date,
+            ):
+                continue
+
+            official_item = dict(api_item)
+            official_item["symbol"] = symbol
+            official_item["_status"] = STATUS_OFFICIAL
+
+            source = str(news_item.get("source", "") or "").strip()
+            official_item["_source_name"] = (
+                source
+                if source
+                else "公司官方公告"
+            )
+            official_item["_source_url"] = str(
+                news_item.get("url", "") or ""
+            ).strip()
+
+            inferred_hour = infer_hour_from_announcement(
+                announcement_text,
+                official_item.get("hour", ""),
+            )
+            if inferred_hour:
+                official_item["hour"] = inferred_hour
+
+            # company-news 通常能確認日期與盤前／盤後時段，
+            # 但不一定能確認財報「精確發布分鐘」。
+            # 不設定 time，build_event 會正確顯示「概略美東時間」。
+            official_item.pop("time", None)
+
+            confirmations.append(official_item)
+            break
+
+    return confirmations
+
+
+def fetch_symbol_company_news(
+    symbol: str,
+    today: datetime.date,
+    api_key: str,
+    lookback_days: int = OFFICIAL_NEWS_LOOKBACK_DAYS,
+    max_retries: int = 3,
+):
+    """
+    取得單一股票近期 company-news，用來尋找公司發布的財報日期公告。
+
+    company-news 只是公告的傳遞管道；最終仍需通過
+    find_official_confirmations_for_symbol 的文字與來源驗證。
+    """
+
+    params = {
+        "symbol": symbol,
+        "from": (
+            today - datetime.timedelta(days=lookback_days)
+        ).isoformat(),
+        "to": today.isoformat(),
+        "token": api_key,
+    }
+
+    last_error = None
+
+    for attempt in range(max_retries):
+        resp = None
+
+        try:
+            resp = requests.get(
+                FINNHUB_COMPANY_NEWS_URL,
+                params=params,
+                timeout=30,
+            )
+        except requests.RequestException as e:
+            last_error = f"連線失敗：{e}"
+        else:
+            if resp.status_code == 429 or resp.status_code >= 500:
+                last_error = f"HTTP {resp.status_code}"
+            elif resp.status_code in (401, 403):
+                raise RuntimeError(
+                    f"{symbol} company-news 無法使用："
+                    f"HTTP {resp.status_code}"
+                )
+            else:
+                try:
+                    resp.raise_for_status()
+                    data = resp.json()
+                except requests.RequestException as e:
+                    raise RuntimeError(
+                        f"{symbol} company-news 查詢失敗：{e}"
+                    ) from e
+                except ValueError as e:
+                    raise RuntimeError(
+                        f"{symbol} company-news 回傳內容不是有效 JSON"
+                    ) from e
+
+                if not isinstance(data, list):
+                    raise RuntimeError(
+                        f"{symbol} company-news 回傳格式不是陣列"
+                    )
+
+                return data
+
+        if attempt < max_retries - 1:
+            retry_after = 2 ** attempt
+            if resp is not None:
+                header_value = resp.headers.get("Retry-After")
+                if header_value and header_value.isdigit():
+                    retry_after = max(
+                        retry_after,
+                        int(header_value),
+                    )
+            time.sleep(retry_after)
+
+    raise RuntimeError(
+        f"{symbol} company-news 查詢失敗"
+        f"（重試 {max_retries} 次）：{last_error}"
+    )
+
+
+def fetch_official_confirmations(
+    results: dict,
+    api_key: str,
+    today: datetime.date,
+    request_delay: float = 0.25,
+):
+    """
+    只對 Finnhub 已有財報候選日期的股票查詢 company-news。
+
+    回傳 (official_events, errors)。
+    company-news 查詢失敗不會影響原本 Finnhub 預估事件；
+    該事件只會維持「預估」狀態。
+    """
+
+    official_events = []
+    errors = {}
+
+    candidate_symbols = [
+        symbol
+        for symbol, items in sorted(results.items())
+        if items
+    ]
+
+    for index, symbol in enumerate(candidate_symbols):
+        if index and request_delay > 0:
+            time.sleep(request_delay)
+
+        try:
+            news_items = fetch_symbol_company_news(
+                symbol,
+                today,
+                api_key,
+            )
+        except RuntimeError as e:
+            errors[symbol] = str(e)
+            continue
+
+        official_events.extend(
+            find_official_confirmations_for_symbol(
+                symbol,
+                results[symbol],
+                news_items,
+            )
+        )
+
+    return official_events, errors
 
 
 # ============================================================
@@ -988,15 +1302,6 @@ def main():
     )
 
     parser.add_argument(
-        "--official-events",
-        type=str,
-        default="official_earnings.json",
-        help=(
-            "公司官方公告確認的財報資料 JSON"
-        ),
-    )
-
-    parser.add_argument(
         "--days-ahead",
         type=int,
         default=45,
@@ -1126,18 +1431,19 @@ def main():
         end_date,
     )
 
-    official_events = load_official_earnings(
-        args.official_events,
-        watchlist,
-        start_date,
-        end_date,
-    )
-
     results, query_errors = fetch_watchlist_earnings(
         watchlist,
         start_date,
         end_date,
         api_key,
+    )
+
+    official_events, official_query_errors = (
+        fetch_official_confirmations(
+            results,
+            api_key,
+            today,
+        )
     )
 
     events, preserved_events = merge_earnings_events(
@@ -1161,6 +1467,14 @@ def main():
         f"第三方預估 {estimated_count} 筆，"
         f"API 失敗暫存 {len(preserved_events)} 筆"
     )
+
+    for symbol, error in sorted(official_query_errors.items()):
+        message = (
+            f"{symbol} 官方公告自動驗證失敗：{error}；"
+            "保留 Finnhub 預估狀態"
+        )
+        print(f"[WARN] {message}")
+        print(f"::warning::{message}")
 
     official_by_symbol = {}
     for item in official_events:
