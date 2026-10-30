@@ -4,6 +4,7 @@
 
 AAPL   # 蘋果
 NVDA   # Nvidia
+AMD
 TSLA   # 特斯拉
 MSFT   # 微軟
 GOOGL  # Google (Alphabet)
